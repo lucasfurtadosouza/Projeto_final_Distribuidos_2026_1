@@ -205,21 +205,6 @@ python3 -m unittest test/teste_tolerancia_falhas.py -v
 
 ---
 
-## Status do Projeto
-
-Itens já implementados e funcionais (testados rodando servidor e cliente de verdade): comunicação cliente-servidor, atendimento concorrente com threads, listagem de itens, cálculo básico de processamento lento, negação de cálculo avançado sem permissão, encerramento de sessão.
-
-Pendências identificadas:
-
-- Integração do módulo de autenticação ao fluxo de `processar_requisicao` em `server.py` — o perfil do usuário ainda é simulado por uma checagem de substring (`"admin" in texto.lower()`).
-- Bug de integração: o fluxo de admin do `client.py` (prefixo `"admin "` antes de `CALCULO:`) não aciona a auditoria de vendas no servidor, porque o servidor exige que a mensagem comece com `CALCULO:`.
-- Criptografia dos dados trafegados entre cliente e servidor.
-- Integração com pelo menos uma API externa aberta.
-- Sistema de logs unificado, cobrindo chamadas recebidas, usuário e permissão envolvidos, e tempo de processamento.
-- Histórico de pedidos, dependente do módulo de logs e persistência em memória.
-
----
-
 ## Licença
 
 Uso acadêmico — Trabalho Final de Sistemas Distribuídos, UTFPR (2026/1).
