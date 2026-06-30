@@ -128,3 +128,31 @@ python3 server.py
 python3 client.py
 # -> [4] processamento lento -> [1] (básico) ou [2] (avançado, testando S/N para admin)
 ```
+
+### Logs para demonstracao
+
+Os logs padronizados do sistema ficam em:
+
+```text
+logs/sistema.log
+```
+
+Este setor registra:
+
+- `processamento_inicio`: perfil, operacao e argumentos recebidos.
+- `processamento_fim`: status, tempo de execucao e resultado resumido.
+- `processamento_fim` com nivel `ERROR`: falhas como permissao negada ou operacao desconhecida.
+
+Exemplo de sucesso:
+
+```text
+2026-06-30 19:52:30 [INFO] [processamento_lento] evento=processamento_inicio | perfil=usuario | operacao=SIMULAR_ENTREGA | argumentos=(2,)
+2026-06-30 19:52:30 [INFO] [processamento_lento] evento=processamento_fim | perfil=usuario | operacao=SIMULAR_ENTREGA | status=Sucesso | tempo_s=0.3462 | resultado={'status': 'Sucesso', 'pedidos_analisados': 2, ...}
+```
+
+Exemplo de erro:
+
+```text
+2026-06-30 19:52:30 [INFO] [processamento_lento] evento=processamento_inicio | perfil=usuario | operacao=AUDITORIA_VENDAS | argumentos=(1000,)
+2026-06-30 19:52:30 [ERROR] [processamento_lento] evento=processamento_fim | perfil=usuario | operacao=AUDITORIA_VENDAS | status=erro | tempo_s=0.0001 | tipo_erro=PermissaoNegadaError
+```

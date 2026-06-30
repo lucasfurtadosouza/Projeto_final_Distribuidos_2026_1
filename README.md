@@ -152,9 +152,69 @@ No cliente, uma thread dedicada cuida exclusivamente do `recv()` e empilha as me
 | `SIMULAR_ENTREGA` | Usuário comum | Loop sequencial na thread do cliente |
 | `AUDITORIA_VENDAS` | Administrador | `ProcessPoolExecutor` (processo separado do sistema operacional) |
 
-Uma tentativa de executar `AUDITORIA_VENDAS` sem permissão de administrador retorna `ERRO_AUTORIZACAO`.
+Uma tentativa de executar `AUDITORIA_VENDAS` sem permissao de administrador retorna erro no protocolo padronizado:
 
-Pendência confirmada em teste: o cliente envia o prefixo `admin` antes de `CALCULO:`, mas o servidor só identifica o comando se a mensagem começar com `CALCULO:`. Na prática, o fluxo de admin do cliente nunca aciona a auditoria — precisa de ajuste de um dos dois lados.
+```text
+ERRO|ERRO_PERMISSAO|Voce nao tem permissao para executar esta operacao.
+```
+
+O servidor reconhece tanto `CALCULO:...` quanto mensagens prefixadas com `admin CALCULO:...`, que e o formato usado pelo menu do cliente para simular um perfil administrador enquanto a autenticacao principal nao esta integrada.
+
+---
+
+## Logs do Sistema
+
+O projeto usa o modulo compartilhado `logs_sistema.py` para padronizar logs do cliente, servidor e processamento lento. O arquivo e criado automaticamente em:
+
+```text
+logs/sistema.log
+```
+
+Tambem ha saida no terminal para acompanhar a demonstracao em tempo real. O formato geral e:
+
+```text
+YYYY-MM-DD HH:MM:SS [NIVEL] [origem] evento=<evento> | campo=valor | ...
+```
+
+Eventos registrados:
+
+- Cliente: conexao, comandos enviados, respostas recebidas e falhas de canal.
+- Servidor: socket iniciado, clientes conectados, chamadas recebidas, respostas enviadas, tempo de cada requisicao e encerramento de threads.
+- Processamento lento: inicio, fim, tempo de execucao, status e resumo do resultado ou erro.
+
+Exemplo de sucesso em processamento lento:
+
+```text
+2026-06-30 19:52:30 [INFO] [servidor] evento=chamada_recebida | cliente=('127.0.0.1', 60499) | mensagem=CALCULO:SIMULAR_ENTREGA|2
+2026-06-30 19:52:30 [INFO] [processamento_lento] evento=processamento_inicio | perfil=usuario | operacao=SIMULAR_ENTREGA | argumentos=(2,)
+2026-06-30 19:52:30 [INFO] [processamento_lento] evento=processamento_fim | perfil=usuario | operacao=SIMULAR_ENTREGA | status=Sucesso | tempo_s=0.3462 | resultado={'status': 'Sucesso', 'pedidos_analisados': 2, ...}
+2026-06-30 19:52:30 [INFO] [servidor] evento=resposta_enviada | cliente=('127.0.0.1', 60499) | status=sucesso | tempo_ms=346.68 | bytes_enviados=323
+```
+
+Exemplo de erro por permissao:
+
+```text
+2026-06-30 19:52:30 [INFO] [servidor] evento=chamada_recebida | cliente=('127.0.0.1', 60498) | mensagem=CALCULO:AUDITORIA_VENDAS|1000
+2026-06-30 19:52:30 [INFO] [processamento_lento] evento=processamento_inicio | perfil=usuario | operacao=AUDITORIA_VENDAS | argumentos=(1000,)
+2026-06-30 19:52:30 [ERROR] [processamento_lento] evento=processamento_fim | perfil=usuario | operacao=AUDITORIA_VENDAS | status=erro | tempo_s=0.0001 | tipo_erro=PermissaoNegadaError
+2026-06-30 19:52:30 [INFO] [servidor] evento=resposta_enviada | cliente=('127.0.0.1', 60498) | status=erro | tempo_ms=1.36 | resumo_resposta=ERRO|ERRO_PERMISSAO|Voce nao tem permissao para executar esta operacao.
+```
+
+Para demonstrar manualmente:
+
+```bash
+# Terminal 1
+python3 server.py
+
+# Terminal 2
+python3 client.py
+# No menu: [4] processamento lento
+# Sucesso: opcao [1], informe poucos pedidos, exemplo 2
+# Erro: opcao [2], informe 1000 registros e responda N para administrador
+# Sucesso admin: opcao [2], informe 1000 registros e responda S para administrador
+```
+
+Depois, abra ou mostre o final de `logs/sistema.log`.
 
 ---
 

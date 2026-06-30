@@ -2,6 +2,7 @@ import socket
 import sys
 import threading
 import queue
+from logs_sistema import obter_logger, registrar_info, registrar_erro
 
 # SETOR TOLERANCIA A FALHAS: conexao resiliente, feedback claro de erro e
 # protecao contra encerramento abrupto do cliente.
@@ -31,6 +32,7 @@ from tolerancia_falhas import tolerancia_falhas as tf
 
 server_address = "127.0.0.1"
 port = 40000
+logger = obter_logger("cliente")
 
 sock: socket.socket | None = None
 fila_recebidas: "queue.Queue[str]" = queue.Queue()
@@ -57,6 +59,7 @@ def main():
 
     sock = try_connection()
     conectado.set()  # liga a flag "estamos conectados"
+    registrar_info(logger, "cliente_conectado", servidor=f"{server_address}:{port}")
 
     # Thread dedicada so para escutar o servidor. Roda em paralelo com o
     # menu (que fica na thread principal, lidando com input() do usuario).
@@ -75,9 +78,11 @@ def main():
         # chamar menu_admin(). Hoje a chamada foi removida do fluxo principal
         # porque nao deve ser oferecida a qualquer usuario sem checagem.
     except (ConnectionError, BrokenPipeError, OSError) as exc:
+        registrar_erro(logger, "cliente_erro_menu", exc)
         tf.registrar_erro("cliente", exc, "canal perdido durante o menu")
         print("\n[CLIENTE] Conexao com o servidor perdida. Encerrando com seguranca.")
     except KeyboardInterrupt:
+        registrar_info(logger, "cliente_encerrado_por_usuario")
         print("\n[CLIENTE] Encerrado pelo usuario.")
     finally:
         conectado.clear()
@@ -87,6 +92,7 @@ def main():
         except OSError:
             pass
         thread_recebe.join(timeout=1)
+        registrar_info(logger, "cliente_finalizado")
 
 
 def try_connection() -> socket.socket:
@@ -96,6 +102,7 @@ def try_connection() -> socket.socket:
     try:
         return tf.conectar_com_retentativa(server_address, port)
     except tf.ErroAplicacao as exc:
+        registrar_erro(logger, "cliente_falha_conexao", exc, servidor=f"{server_address}:{port}")
         print(f"\n[CLIENTE] {exc.mensagem_usuario}")
         sys.exit(1)
 
@@ -116,6 +123,14 @@ def listen():
                 break
 
             packet = data.decode("utf-8", errors="replace").strip()
+            registrar_info(
+                logger,
+                "resposta_recebida",
+                servidor=f"{server_address}:{port}",
+                bytes_recebidos=len(data),
+                status="erro" if tf.e_resposta_de_erro(packet) else "sucesso",
+                resposta=packet,
+            )
             # Em vez de decidir aqui o que fazer com o pacote (a thread de
             # rede nao deve imprimir na tela por conta propria, para nao
             # embaralhar com o input() do usuario), so empilhamos na fila.
@@ -127,6 +142,7 @@ def listen():
             # quando o canal cai. TOLERANCIA A FALHAS: registra e avisa o
             # usuario via fila, sem derrubar o cliente com traceback.
             if conectado.is_set():
+                registrar_erro(logger, "cliente_erro_recebimento", exc)
                 tf.registrar_erro("cliente.listen", exc, "falha ao receber do servidor")
                 fila_recebidas.put("[conexao perdida com o servidor]")
             conectado.clear()
@@ -143,6 +159,21 @@ def mostrar_mensagens_pendentes():
             print(f"\n[ERRO DO SERVIDOR] {tf.descrever_erro_para_usuario(msg)}")
         else:
             print(f"\n[SERVIDOR] {msg}")
+
+
+def enviar_comando(comando: str, contexto: str):
+    if not conectado.is_set() or sock is None:
+        raise ConnectionError("cliente nao esta conectado ao servidor")
+
+    dados = comando.encode("utf-8")
+    registrar_info(
+        logger,
+        "comando_enviado",
+        contexto=contexto,
+        bytes_enviados=len(dados),
+        comando=comando,
+    )
+    sock.sendall(dados)
 
 
 def menu():
@@ -169,7 +200,7 @@ def menu():
             case "4":
                 menu_processamento_lento()
             case "0":
-                sock.sendall(b"CLOSECONNECTION")
+                enviar_comando("CLOSECONNECTION", "menu_sair")
                 conectado.clear()
                 sock.close()
                 break
@@ -206,12 +237,12 @@ def pagamento(carrinho):
     # Este setor so garante que o sendall() abaixo NAO trava o resto do
     # cliente, ja que quem escuta a resposta e a thread_recebe, nao o
     # menu().
-    sock.sendall(b"LISTADEITENS")
+    enviar_comando("LISTADEITENS", "pedido_listar_itens")
 
     for indice_str in carrinho:
         if indice_str.isdigit() and int(indice_str) < len(catalogo):
             item = catalogo[int(indice_str)]
-            sock.sendall(item.nome.encode("utf-8"))
+            enviar_comando(item.nome, "pedido_item")
 
 
 def deposito():
@@ -221,14 +252,14 @@ def deposito():
     # fica a cargo dos setores responsaveis.
     print("\nDigite o valor a depositar:")
     valor = input()
-    sock.sendall(f"DEPOSITO|{valor}".encode("utf-8"))
+    enviar_comando(f"DEPOSITO|{valor}", "deposito")
 
 
 def historico():
     # TODO(LOGS): o historico de pedidos depende do sistema de logs/
     # persistencia em memoria definido pelo setor de LOGS, TESTES E
     # DOCUMENTACAO, e de permissoes do setor de AUTENTICACAO.
-    sock.sendall(b"HISTORICO")
+    enviar_comando("HISTORICO", "historico")
 
 
 def menu_admin():
@@ -248,7 +279,7 @@ def menu_processamento_lento():
     if opcao == "1":
         pedidos = input("Digite a quantidade de pedidos para simular (ex: 5): ").strip()
         # Envia no formato esperado pelo nosso gancho no servidor
-        sock.sendall(f"CALCULO:SIMULAR_ENTREGA|{pedidos}".encode("utf-8"))
+        enviar_comando(f"CALCULO:SIMULAR_ENTREGA|{pedidos}", "processamento_lento_basico")
         print("Solicitação enviada. Aguardando resposta do servidor...")
         
     elif opcao == "2":
@@ -257,9 +288,15 @@ def menu_processamento_lento():
         como_admin = input("Deseja simular como Administrador? (S/N): ").strip().upper()
         
         if como_admin == "S":
-            sock.sendall(f"admin CALCULO:AUDITORIA_VENDAS|{registros}".encode("utf-8"))
+            enviar_comando(
+                f"admin CALCULO:AUDITORIA_VENDAS|{registros}",
+                "processamento_lento_avancado_admin",
+            )
         else:
-            sock.sendall(f"CALCULO:AUDITORIA_VENDAS|{registros}".encode("utf-8"))
+            enviar_comando(
+                f"CALCULO:AUDITORIA_VENDAS|{registros}",
+                "processamento_lento_avancado_usuario",
+            )
             
         print("Solicitação pesada enviada! Graças ao Multiprocessing, o servidor não vai travar.")
         

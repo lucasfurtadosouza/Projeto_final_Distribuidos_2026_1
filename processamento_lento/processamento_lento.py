@@ -2,6 +2,7 @@ import time
 import math
 import random
 from concurrent.futures import ProcessPoolExecutor
+from logs_sistema import obter_logger, registrar_info, registrar_erro
 
 # =========================================================================
 #6. PROCESSAMENTO LENTO E MULTIPROCESSING
@@ -12,6 +13,9 @@ from concurrent.futures import ProcessPoolExecutor
 
 class PermissaoNegadaError(Exception):
     pass
+
+
+logger = obter_logger("processamento_lento")
 
 
 def _calcular_simulacao_vendas_pesada(num_registros: int) -> dict:
@@ -84,35 +88,78 @@ def processamento_avancado_auditoria(num_registros: int) -> dict:
 def despachar_processamento(perfil_usuario: str, tipo_operacao: str, *args) -> str:
     perfil = perfil_usuario.lower().strip()
     operacao = tipo_operacao.upper().strip()
-    
-    cronometro_inicio = time.time()
-    
-    if operacao == "SIMULAR_ENTREGA":
-        # Operação que qualquer usuário pode executar, mas é lenta
-        num_pedidos = args[0] if args else 5
-        resultado_dados = processamento_basico_motoboy(int(num_pedidos))
-        
-    elif operacao == "AUDITORIA_VENDAS":
-        # Operação que apenas administradores podem executar, e é muito pesada
-        if perfil != "administrador":
-            raise PermissaoNegadaError(
-                f"Erro: O perfil '{perfil_usuario}' não possui a permissão necessária para executar Auditoria."
-            )
-            
-        num_registros = args[0] if args else 15_000_000  # Valor padrão alto para estressar CPU
-        resultado_dados = processamento_avancado_auditoria(int(num_registros))
-        
-    else:
-        return f"ERRO: Operação de processamento '{tipo_operacao}' desconhecida.\n"
 
-    tempo_decorrido = time.time() - cronometro_inicio
-    
-    resposta_formatada = (
-        f"--- RESULTADO PROCESSAMENTO LENTO ---\n"
-        f"Tipo: {resultado_dados.get('tipo', 'Não definido')}\n"
-        f"Detalhes: {resultado_dados}\n"
-        f"Tempo de Computação no Servidor: {tempo_decorrido:.4f} segundos\n"
-        f"--------------------------------------\n"
+    cronometro_inicio = time.perf_counter()
+    registrar_info(
+        logger,
+        "processamento_inicio",
+        perfil=perfil,
+        operacao=operacao,
+        argumentos=args,
     )
-    
-    return resposta_formatada
+
+    try:
+        if operacao == "SIMULAR_ENTREGA":
+            # Operação que qualquer usuário pode executar, mas é lenta
+            num_pedidos = args[0] if args else 5
+            resultado_dados = processamento_basico_motoboy(int(num_pedidos))
+
+        elif operacao == "AUDITORIA_VENDAS":
+            # Operação que apenas administradores podem executar, e é muito pesada
+            if perfil != "administrador":
+                raise PermissaoNegadaError(
+                    f"Erro: O perfil '{perfil_usuario}' não possui a permissão necessária para executar Auditoria."
+                )
+
+            num_registros = args[0] if args else 15_000_000  # Valor padrão alto para estressar CPU
+            resultado_dados = processamento_avancado_auditoria(int(num_registros))
+
+        else:
+            tempo_decorrido = time.perf_counter() - cronometro_inicio
+            resposta_erro = f"ERRO: Operação de processamento '{tipo_operacao}' desconhecida.\n"
+            erro_operacao = ValueError(resposta_erro.strip())
+            registrar_erro(
+                logger,
+                "processamento_fim",
+                erro_operacao,
+                perfil=perfil,
+                operacao=operacao,
+                status="erro",
+                tempo_s=f"{tempo_decorrido:.4f}",
+                resultado=resposta_erro,
+            )
+            return resposta_erro
+
+        tempo_decorrido = time.perf_counter() - cronometro_inicio
+
+        resposta_formatada = (
+            f"--- RESULTADO PROCESSAMENTO LENTO ---\n"
+            f"Tipo: {resultado_dados.get('tipo', 'Não definido')}\n"
+            f"Detalhes: {resultado_dados}\n"
+            f"Tempo de Computação no Servidor: {tempo_decorrido:.4f} segundos\n"
+            f"--------------------------------------\n"
+        )
+
+        registrar_info(
+            logger,
+            "processamento_fim",
+            perfil=perfil,
+            operacao=operacao,
+            status=resultado_dados.get("status", "Sucesso"),
+            tempo_s=f"{tempo_decorrido:.4f}",
+            resultado=resultado_dados,
+        )
+        return resposta_formatada
+
+    except Exception as exc:
+        tempo_decorrido = time.perf_counter() - cronometro_inicio
+        registrar_erro(
+            logger,
+            "processamento_fim",
+            exc,
+            perfil=perfil,
+            operacao=operacao,
+            status="erro",
+            tempo_s=f"{tempo_decorrido:.4f}",
+        )
+        raise

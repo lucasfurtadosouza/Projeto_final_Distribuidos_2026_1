@@ -1,7 +1,9 @@
 import socket
 import sys
 import threading
-from processamento_lento.processamento_lento import despachar_processamento, PermissaoNegadaError
+import time
+from logs_sistema import obter_logger, registrar_info, registrar_erro
+from processamento_lento.processamento_lento import despachar_processamento
 
 # SETOR TOLERANCIA A FALHAS: rede de seguranca para erros do lado do servidor.
 from tolerancia_falhas import tolerancia_falhas as tf
@@ -26,6 +28,7 @@ from tolerancia_falhas import tolerancia_falhas as tf
 
 host_address = "127.0.0.1"
 port = 40000
+logger = obter_logger("servidor")
 
 # ----- controle de threads ativas (so para fins de demonstracao/log) -----
 threads_ativas = 0
@@ -60,8 +63,10 @@ def socket_start() -> socket.socket:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((host_address, port))
+        registrar_info(logger, "socket_iniciado", host=host_address, porta=port)
         return sock
     except OSError as exc:
+        registrar_erro(logger, "socket_erro", exc, host=host_address, porta=port)
         print(
             f"[SERVER] Não foi possível usar {host_address}:{port} ({exc}).",
             file=sys.stderr,
@@ -78,6 +83,7 @@ def listen(sock: socket.socket):
     sock.listen(5)
 
     print(f"[SERVER] Escutando em {host_address}:{port}", flush=True)
+    registrar_info(logger, "servidor_escutando", host=host_address, porta=port)
     print(
         "[SERVER] Aguardando clientes (fica parado aqui até um connect) — é normal.",
         flush=True,
@@ -88,6 +94,7 @@ def listen(sock: socket.socket):
         while True:
             conn, endereco = sock.accept()
             print(f"[SERVER] Cliente conectado: {endereco}")
+            registrar_info(logger, "cliente_conectado", cliente=endereco)
 
             # cada cliente recebe sua propria thread de atendimento.
             # daemon=True garante que essas threads nao impedem o processo
@@ -100,8 +107,10 @@ def listen(sock: socket.socket):
             thread_cliente.start()
 
     except KeyboardInterrupt:
+        registrar_info(logger, "servidor_encerrado_por_usuario")
         print("\n[SERVER] Encerrado.")
     finally:
+        registrar_info(logger, "socket_fechado", host=host_address, porta=port)
         sock.close()
 
 
@@ -117,6 +126,13 @@ def atender_cliente(conn: socket.socket, endereco):
     with lock_threads:
         threads_ativas += 1
         print(f"[SERVER] Threads ativas no momento: {threads_ativas}")
+        registrar_info(
+            logger,
+            "thread_cliente_iniciada",
+            cliente=endereco,
+            thread=threading.current_thread().name,
+            threads_ativas=threads_ativas,
+        )
 
     # TOLERANCIA A FALHAS: timeout de inatividade. Um cliente "pendurado"
     # (travado/morto sem fechar a conexao) nao segura a thread para sempre.
@@ -131,23 +147,50 @@ def atender_cliente(conn: socket.socket, endereco):
 
             if not data:
                 print(f"[SERVER] Cliente {endereco} fechou a conexão.")
+                registrar_info(logger, "cliente_fechou_conexao", cliente=endereco)
                 break
 
             texto = data.decode("utf-8", errors="replace").strip()
             print(f"[SERVER] [{endereco}] recebido: {texto!r} "
                   f"(thread={threading.current_thread().name})")
+            registrar_info(
+                logger,
+                "chamada_recebida",
+                cliente=endereco,
+                thread=threading.current_thread().name,
+                bytes_recebidos=len(data),
+                mensagem=texto,
+            )
 
             # TOLERANCIA A FALHAS: rejeita mensagens invalidas (ex.: grandes
             # demais) com feedback claro, sem derrubar a conexao.
             try:
                 tf.validar_mensagem(texto)
             except tf.RequisicaoInvalidaError as exc:
+                registrar_erro(
+                    logger,
+                    "chamada_rejeitada",
+                    exc,
+                    cliente=endereco,
+                    mensagem=texto,
+                )
                 tf.registrar_erro(f"server[{endereco}]", exc, "mensagem invalida recebida")
-                conn.sendall(tf.formatar_erro(exc.codigo, exc.mensagem_usuario).encode("utf-8"))
+                resposta_erro = tf.formatar_erro(exc.codigo, exc.mensagem_usuario)
+                conn.sendall(resposta_erro.encode("utf-8"))
+                registrar_info(
+                    logger,
+                    "resposta_enviada",
+                    cliente=endereco,
+                    status="erro",
+                    codigo=exc.codigo,
+                    bytes_enviados=len(resposta_erro.encode("utf-8")),
+                )
                 continue
 
             if exit_request(texto):
-                conn.sendall(b"OK: sessao encerrada no servidor.\n")
+                resposta_saida = "OK: sessao encerrada no servidor.\n"
+                conn.sendall(resposta_saida.encode("utf-8"))
+                registrar_info(logger, "sessao_encerrada_pelo_cliente", cliente=endereco)
                 print(f"[SERVER] Encerramento pedido pelo cliente {endereco}.")
                 break
 
@@ -155,15 +198,27 @@ def atender_cliente(conn: socket.socket, endereco):
             # seguranca". Qualquer excecao nao prevista vira uma resposta de
             # erro padronizada (e registrada em log), em vez de matar esta
             # thread e desconectar o cliente sem explicacao.
+            inicio = time.perf_counter()
             resposta = tf.processar_requisicao_segura(
                 processar_requisicao, texto, conn, endereco,
                 origem=f"server[{endereco}]",
             )
+            tempo_ms = (time.perf_counter() - inicio) * 1000
             conn.sendall(resposta.encode("utf-8"))
+            registrar_info(
+                logger,
+                "resposta_enviada",
+                cliente=endereco,
+                status="erro" if tf.e_resposta_de_erro(resposta) else "sucesso",
+                tempo_ms=f"{tempo_ms:.2f}",
+                bytes_enviados=len(resposta.encode("utf-8")),
+                resumo_resposta=resposta,
+            )
 
     except socket.timeout:
         # Cliente inativo por tempo demais: encerra com feedback e libera a thread.
         tf.registrar_evento(f"server[{endereco}]", "conexao encerrada por inatividade (timeout)")
+        registrar_info(logger, "cliente_timeout", cliente=endereco)
         try:
             conn.sendall(
                 tf.formatar_erro(tf.ERRO_TIMEOUT, "Conexao encerrada por inatividade.").encode("utf-8")
@@ -175,11 +230,13 @@ def atender_cliente(conn: socket.socket, endereco):
         # Queda abrupta do canal (cliente caiu/foi morto). Registramos e
         # seguimos: as demais threads/clientes continuam funcionando.
         tf.registrar_erro(f"server[{endereco}]", exc, "conexao perdida")
+        registrar_erro(logger, "conexao_perdida", exc, cliente=endereco)
         print(f"[SERVER] Conexão com {endereco} perdida ({exc}).")
     except Exception as exc:
         # Ultima barreira: nenhum erro inesperado pode derrubar o servidor
         # sem registro. A thread morre de forma controlada e logada.
         tf.registrar_erro(f"server[{endereco}]", exc, "erro inesperado na thread de atendimento")
+        registrar_erro(logger, "thread_cliente_erro_inesperado", exc, cliente=endereco)
         print(f"[SERVER] Erro inesperado ao atender {endereco}: {exc}")
     finally:
         conn.close()
@@ -187,6 +244,12 @@ def atender_cliente(conn: socket.socket, endereco):
             threads_ativas -= 1
             print(f"[SERVER] Socket de {endereco} fechado. "
                   f"Threads ativas restantes: {threads_ativas}\n")
+            registrar_info(
+                logger,
+                "thread_cliente_finalizada",
+                cliente=endereco,
+                threads_ativas=threads_ativas,
+            )
 
 
 def processar_requisicao(texto: str, conn: socket.socket, endereco) -> str:
@@ -228,25 +291,27 @@ def processar_requisicao(texto: str, conn: socket.socket, endereco) -> str:
     # PARSE SIMPLES DE COMANDOS DO SEU SETOR
     # Exemplo de comandos: "CALCULO:SIMULAR_ENTREGA|5" ou "CALCULO:AUDITORIA_VENDAS|20000000"
     # -------------------------------------------------------------------------
-    if texto.upper().startswith("CALCULO:"):
-        try:
-            # Divide o comando e os parâmetros
-            partes = texto.split(":", 1)[1].split("|")
-            operacao = partes[0]
-            parametro = int(partes[1]) if len(partes) > 1 else None
-            
-            # Chama o seu despachador isolado
-            # Roda dentro da thread deste cliente específico, mas se for AUDITORIA_VENDAS,
-            # usará multiprocessamento internamente sem engasgar o núcleo do servidor.
-            if parametro:
-                resposta_calculo = despachar_processamento(perfil_mockado, operacao, parametro)
-            else:
-                resposta_calculo = despachar_processamento(perfil_mockado, operacao)
-                
-            return resposta_calculo
+    posicao_calculo = texto.upper().find("CALCULO:")
+    if posicao_calculo >= 0:
+        comando_calculo = texto[posicao_calculo:]
+        partes = comando_calculo.split(":", 1)[1].split("|")
+        operacao = partes[0]
+        parametro = int(partes[1]) if len(partes) > 1 else None
 
-        except PermissaoNegadaError as p_exc:
-            return f"ERRO_AUTORIZACAO: {str(p_exc)}\n"
+        registrar_info(
+            logger,
+            "processamento_lento_solicitado",
+            cliente=endereco,
+            perfil=perfil_mockado,
+            operacao=operacao,
+            parametro=parametro,
+        )
+
+        # Chama o despachador isolado. PermissaoNegadaError deve subir ate
+        # tf.processar_requisicao_segura para virar ERRO|ERRO_PERMISSAO|...
+        if parametro is not None:
+            return despachar_processamento(perfil_mockado, operacao, parametro)
+        return despachar_processamento(perfil_mockado, operacao)
 
     if texto.upper() == "LISTADEITENS":
         # Exemplo simples de resposta a partir do catalogo da BASE.
